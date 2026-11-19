@@ -1,5 +1,6 @@
 import os, re
 from datetime import datetime, timezone
+from urllib.parse import urlparse, parse_qs
 from io import BytesIO
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
@@ -14,12 +15,58 @@ from platforms import fetch_social, identify_platform
 from ml_engine import analyze_comments, make_recommendations, keywords
 
 load_dotenv()
+def get_embed_url(url):
+    """
+    Convert supported social media URLs into embeddable URLs.
+    Returns an empty string if an embed URL cannot be generated.
+    """
+    try:
+        parsed = urlparse(url)
+        host = parsed.netloc.lower().replace("www.", "")
+        path = parsed.path.strip("/")
+
+        # YouTube
+        if host in ("youtube.com", "m.youtube.com", "youtu.be"):
+            video_id = ""
+
+            if host == "youtu.be":
+                video_id = path.split("/")[0]
+            elif path == "watch":
+                video_id = parse_qs(parsed.query).get("v", [""])[0]
+            elif path.startswith(("shorts/", "embed/", "live/")):
+                video_id = path.split("/")[1]
+
+            if video_id and re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                return f"https://www.youtube.com/embed/{video_id}"
+
+        # Instagram posts and reels
+        if host == "instagram.com":
+            parts = path.split("/")
+            if len(parts) >= 2 and parts[0] in ("p", "reel", "tv"):
+                shortcode = parts[1]
+                if re.fullmatch(r"[A-Za-z0-9_-]+", shortcode):
+                    return f"https://www.instagram.com/{parts[0]}/{shortcode}/embed"
+
+        # Facebook videos and posts
+        if host in ("facebook.com", "m.facebook.com", "fb.watch"):
+            from urllib.parse import quote
+            return (
+                "https://www.facebook.com/plugins/video.php?href="
+                + quote(url, safe="")
+                + "&show_text=false"
+            )
+
+    except Exception:
+        pass
+
+    return "" 
+
 def create_app():
     app=Flask(__name__)
     app.config.from_object(Config)
     CORS(app, origins=[app.config["FRONTEND_ORIGIN"]])
     db.init_app(app); jwt.init_app(app)
-    with app.app_context(): db.create_all()
+    with app.app_context(): db.create_all()  
 
     def user_id(): return int(get_jwt_identity())
     def analysis_json(a):
@@ -186,11 +233,14 @@ def create_app():
                     "platform": platform,
                     "title": "Clearly labelled sample analysis (100 demo comments)",
                     "description": "100 predefined synthetic sample comments (40 positive examples, 30 negative examples and 30 neutral examples). These comments were not fetched from the submitted social media post.",
-                    "embed_url": "",
+                    "embed_url": get_embed_url(url),
                     "comments": demo_comments
                 }
             else:
                 source = fetch_social(url)
+                source["embed_url"] = (
+                    source.get("embed_url") or get_embed_url(url)
+            )
 
             results=analyze_comments(source["comments"])
             counts={k:sum(1 for c in results if c["sentiment"]==k) for k in ("positive","negative","neutral")}
